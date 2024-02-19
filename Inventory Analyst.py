@@ -357,7 +357,7 @@ with specific_info:
             # Create a line chart with Plotly
             # Start x on 1 
             fig = px.bar(df, x='LT', y='Demand', title='Consumption', labels={'LT': 'Lead Time(Forward)', 'Demand': 'Demand'}, range_x=[1, len(data_vector)])
-
+            
             # Display the Plotly chart in Streamlit
             graph.plotly_chart(fig)
 
