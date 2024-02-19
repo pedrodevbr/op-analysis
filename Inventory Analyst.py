@@ -39,6 +39,12 @@ import plotly.express as px
 import altair as alt
 
 #######################
+# CONSTANTS
+ORDER_ZE_TRESHOLD = 400 # threshold for ZE policy, higher than this value is considered high
+CV_THRESHOLD = 0.5
+TMD_THRESHOLD = 1.32
+
+#######################
 # Page configuration
 st.set_page_config(
     page_title="Data Analysis - Inventory Management",
@@ -47,9 +53,8 @@ st.set_page_config(
     initial_sidebar_state="expanded")
 
 alt.themes.enable("dark")
-
 #######################
-# Load data
+# Load data and clean data
 @st.cache_data
 def load_data():
         
@@ -134,23 +139,31 @@ def clean_oc(df):
     df['Last OC'] = pd.to_datetime(df['Data do documento'], format='%d-%m-%Y %H:%M:%S').dt.strftime('%d-%m-%Y')
     oc_df = df[['Material','Last OC']]
 
-
     return oc_df
 oc_df = clean_oc(oc_df)
 
 def clean_textos(df):
     # turn Material into string
     df['Material'] = df['Material'].astype(str)
+    # drop NaN values from the OBS field
     df = df.dropna(subset=['Texto OBS - pt'])
     df['Texto OBS - pt'] = df['Texto OBS - pt'].astype(str)
     #join all Texto OBS - pt for each material
     obs_df = df.groupby('Material')['Texto OBS - pt'].apply(lambda x: '\n'.join(x))
     
     return obs_df
-
 textos_df = clean_textos(textos_df)
-textos_df.head()
 
+#######################
+# Functions
+
+def days_to_now(date):
+    # convert value to datetime
+    date = pd.to_datetime(date)
+    # calculate the days
+    date = dt.datetime.now() - date
+    return date.days
+    
 def days_in_op(df):
     # convert AbertPl to datetime
     df['AbertPl'] = pd.to_datetime(df['AbertPl'])
@@ -163,13 +176,14 @@ def summary(op_df, san_df, consumo_df, reserva_df):
     
     #OP
     df = pd.DataFrame()
-    df["Action"] = '-'
+    df["Action"] = ''
     df["Material"] = op_df["Material"]
     df["Description"] = op_df["Nº do material"]
     
     df["Policy"] = op_df['TpM']
     df['PR'] = op_df['Pt.reabast.'].astype(int)
     df['Max'] = op_df['Est.máximo'].astype(int)
+    df['LT'] = op_df['PEP'].astype(int)
     #df["Policy"] = df['TpM'].astype(str) + ' = ' + df['Pt.reabast.'].astype(str) + '/' + df['Est.máximo'].astype(str)
     df["GM"] = op_df["GrpMercads."]
     df['Status'] = op_df['GMRP']
@@ -181,7 +195,7 @@ def summary(op_df, san_df, consumo_df, reserva_df):
     df['Qty OP'] = op_df['Qtd.ordem'].astype(float)
     df["Days in planned order"] = days_in_op(op_df)
     df['Reference'] = op_df['NºPF']
-
+    
     #OC
     # merge last purchase order with the df
     df = df.merge(oc_df, on='Material', how='left')
@@ -200,24 +214,71 @@ def summary(op_df, san_df, consumo_df, reserva_df):
 data_df = summary(op_df, san_df, consumo_df,reserva_df)
 
 def define_action(df):
+    df['Action'] = ''
+    if df['LT'] < 30:
+        df['Action'] += "Ajustar LT"
+    if df['Status'] == 'ZSTK':
+        if df['Reference']=='Sem referencia':
+            df['Action'] += (' /Atribuir referencia')
+        try:
+            if days_to_now(int(df['Last OC'])) < 12*30:
+                df['Action'] += ' /Revisar consumo/Aumentar MAX'
+            if days_to_now(int(df['Last OC'])) > 60*30:
+                df['Action'] += ' /Revisar referencia'
+        except:
+            pass
 
-    if df['Qty in LMR'] > 0 and (df['Status'] == 'FRAC' or df['Status'] == 'ANA'):
-        df['Action'] = 'Abrir consulta SMIT'
-    elif df["Status"]=='AD':
+        if df['Policy'] == 'ZM':
+            if df['2nd highest'] < 0.8*df['PR']:
+                df['Action'] += f' /Diminuir PR para {df["2nd highest"]} e ajustar Est. Máximo'
+            elif df['2nd highest'] > df['PR']:
+                df['Action'] += f' /Aumentar PR para {df["2nd highest"]} e ajustar Est. Máximo'
+            try:
+                if df['Texto OBS - pt'].contains('desenho') == True:
+                    df['Action'] += ' \Anexar desenho'
+                elif df['Texto OBS - pt'].contains('sustentabilidade') == True:
+                    df['Action'] += ' \Anexar sustentabilidade'
+            except:
+                pass
+                
+        elif df['Policy'] =='ZE' and df['Order Value'] < ORDER_ZE_TRESHOLD:
+            df['Action'] += ' /ZE com valor baixo'
+            
+    elif df['Status'] == 'SMIT':
+        df['Action'] = 'Cobrar atualização na consulta'
+    elif df['Status'] == 'ANA':
+        if df['Qty in LMR'] > 0:
+            df['Action'] = 'Abrir consulta SMIT'
+    elif df['Status'] == 'FRAC':
+        if df['Qty in LMR'] > 0:
+            df['Action'] = 'Abrir consulta SMIT'
+    elif df['Status'] == 'AD':
         df['Action'] = 'Solicitar cotação ou verificar se o fornecedor esta cadastrado'
-    elif df['Policy']=='ND':
+    elif df['Policy'] == 'ND':
         df['Action'] = 'Excluir OP, sem política'
-    elif df['2nd highest'] > df['PR'] and df['Status']=='ZSTK' and df['Policy']=='ZM':
-        df['Action'] = f'Aumentar PR para {df["2nd highest"]} e ajustar Est. Máximo'
-    elif df['2nd highest'] < 0.8*df['PR'] and df['Status']=='ZSTK' and df['Policy']=='ZM':
-        df['Action'] = f'Diminuir PR para {df["2nd highest"]} e ajustar Est. Máximo'
-    elif df['Status'] == 'ZSTK' and df['Reference']=='Sem referencia':
-        df['Action'] = 'Atribuir referencia'
-    if "Sustentabilidade" in str(df['Texto OBS - pt']):
-        df['Action'] = 'Incluir clausula sustentabilidade no pedido de compra'
+    elif df['Status'] == 'ZDCO':
+        df["Action"] = "Mudar politica para ZD e status para ZSTK"
+    elif df['Status'] == 'DESC':
+        df["Action"] = "Revisar texto/Jira Aberto"
+    else:
+        df['Action'] = 'Revisar Status'
+    
     return df
 
 data_df = data_df.apply(define_action, axis=1)
+
+# group by first 4 digits in GM 
+def group_gm(df):
+    df['GM'] = df['GM'].astype(str)
+    df['GM_4dig'] = df['GM'].str[:4]
+    # sort by GM_4dig
+    grouped = df.sort_values('GM_4dig')
+    group_gm = grouped.groupby('GM_4dig').agg({'Material':'count','Order Value':'sum'}).sort_values('Order Value', ascending=False)
+    #print groups separately
+    #for group in group_gm.index:
+    #    print(grouped[grouped['GM_4dig'] == group])
+    #return grouped
+group_gm(data_df)
 
 # General info
 # Average AbertPl time
@@ -235,6 +296,7 @@ most_expensive['Order Value'] = most_expensive['Order Value']
 
 pr_1 = data_df[(data_df['PR'] == 1) & (data_df['Policy'].isin(['ZM', 'ZE']))][['Material','Description', 'Policy','Order Value']]
 
+#######################
 ###### Streamlit ######
 
 # Create a Streamlit app
@@ -282,8 +344,8 @@ with specific_info:
             # filtered_df = filtered_df.drop(columns=['Material','Description','Policy','GM','Status','Criticidade','Reserved','Order Value','Virtual Stock','Qty OP','Days in planned order','Reference','Last OC','Qty in LMR'])
             filtered_df['Order Value'] = filtered_df['Order Value'].apply(lambda x: f'$ {x:,.2f}')
 
-            specs.dataframe(filtered_df[['Material','Description','Policy','PR','Max','GM','Status','Criticity','Reserved','Order Value','Virtual Stock','Qty OP','Days in planned order','Reference','Last OC','Qty in LMR']].transpose(),use_container_width=True,height=500,)
-            
+            specs.dataframe(filtered_df[['Material','Description','Policy','PR','Max','GM','LT','Status','Criticity','Reserved','Order Value','Virtual Stock','Qty OP','Days in planned order','Reference','Last OC','Qty in LMR']].transpose(),use_container_width=True,height=700)
+
             # plot consumption data from selected material
             # each row is a different material and each column is a different consumption value
             data = consumo_df[consumo_df['Material'].isin(selected_material)].iloc[:, 3:-2].dropna(axis=1)
@@ -293,11 +355,15 @@ with specific_info:
             df = pd.DataFrame({'Demand': data_vector, 'LT': data_vector.index})
 
             # Create a line chart with Plotly
-            fig = px.line(df, x='LT', y='Demand', title='Consumption', labels={'LT': 'Lead Time', 'Demand': 'Demand'})
+            # Start x on 1 
+            fig = px.bar(df, x='LT', y='Demand', title='Consumption', labels={'LT': 'Lead Time(Forward)', 'Demand': 'Demand'}, range_x=[1, len(data_vector)])
 
             # Display the Plotly chart in Streamlit
             graph.plotly_chart(fig)
 
+            #upload a photo
+            graph.image('./data/fotos/teste.JPG',use_column_width=True,caption='teste',output_format='auto')
+            graph.write('OBS:')
             graph.write(filtered_df['Texto OBS - pt'].values[0])
             # plot the last reserve: Last reserve, Descrição do Equipamento, Motivo da Reserva
             st.write("Ultima reserva")
