@@ -14,9 +14,7 @@ import altair as alt
 import streamlit as st
 
 # import image
-from IPython.display import Image as IPythonImage
-
-
+#from IPython.display import Image as IPythonImage
 
 #######################
 # CONSTANTS
