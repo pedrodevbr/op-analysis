@@ -235,9 +235,9 @@ with individual_tab:
     t130_long = t130_long[t130_long['LTD'] != 'Prz.entrg.prev.']
     fig = px.bar(t130_long, x='LTD', y='Consumo', title=f'Consumo por LTD {df[["Prz.entrg.prev."]].values[0]}')
     # add a line for ponto de reabastecimento
-    fig.add_hline(y=material_df['Pt.reabast.'].values[0], line_dash='dot', line_color='red', annotation_text='Ponto de reabastecimento')
+    #fig.add_hline(y=material_df['Pt.reabast.'].values[0], line_dash='dot', line_color='red', annotation_text='Ponto de reabastecimento')
     # add a line for estoque maximo
-    fig.add_hline(y=material_df['Est.máximo'].values[0], line_dash='dot', line_color='green', annotation_text='Estoque máximo')
+    #fig.add_hline(y=material_df['Est.máximo'].values[0], line_dash='dot', line_color='green', annotation_text='Estoque máximo')
     st.plotly_chart(fig)
     
     
