@@ -1,48 +1,40 @@
-
-## This program manage the mro inventory of a company
-# The goal is analyse the planned orders and decide if it will be converted in a purchase order or not
-
-## Some assumptions are:
-# Cost of process is high (Idealy I want to reduce the number of purchase orders)
-# Cost of storage is low  (I have a lot of space)
-# Disponibility to client of 92%
-# The lead time varies for every material
-# The lead time is the time between the request and the delivery 
-
-## Data on the sheet:
-# Date of last purchase order
-# Data of last consumption
-# Criticity
-# Lead time
-# Cost of material
-
-## Calculate
-# Replenishment point
-# Maximum stock
-
-## The program will be used for the following steps:
-# 1 - Upload the material data from SAP
-# 2 - classify the itens based on consumption 
-# In the OP there are the last purchase order, criticity, lead time, virtual stock, stock, cost of material 
-# calculate the optimal replenishment quantity and the maximum stock based on the best management literature
-# Prz.entrg.prev. = Lead time
-# 1 LTD = Last month consumption
+################################
+# Analise de ordens planejadas #
+################################
 
 
 #######################
 # Import libraries
 import pandas as pd
 import numpy as np
-import streamlit as st
 import datetime as dt
 import plotly.express as px
 import altair as alt
+import matplotlib.pyplot as plt
+import streamlit as st
+
+# import image
+from IPython.display import Image as IPythonImage
+
+
 
 #######################
 # CONSTANTS
-ORDER_ZE_TRESHOLD = 400 # threshold for ZE policy, higher than this value is considered high
-CV_THRESHOLD = 0.5
-TMD_THRESHOLD = 1.32
+
+DEBUG = True
+#######################
+# data da extração de dados SAP
+
+data_OP = dt.datetime.now().strftime('%Y-%m')
+data_OP = '2024-03'
+DIR_PATH = f'./data/{data_OP}/'
+
+# create a new directory
+import os
+if not os.path.exists(DIR_PATH):
+    os.makedirs(DIR_PATH)
+
+print(f'Extrair dados de {data_OP}...')
 
 #######################
 # Page configuration
@@ -52,412 +44,203 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded")
 
-alt.themes.enable("dark")
-#######################
-# Load data and clean data
+### Definir quais colunas serão utilizadas de cada dataframe ###
+
+## Unico material por linha
+# OP        - AbertPl,Material,Nº do material,PlMRP,GrpMercads.,GMRP,PEP,Criticidade,TpM,Demanda,Saldo Virtual,Pt.reabast.,Est.máximo,Qtd.ordem,CMM,Estq.segurança,Quantidade Tp 1,Quantidade Tp 3,Quantidade Tp 6,Valor total da Orden Planejada,NºPF
+# SAN       - Material, Stat.mat.todos cent.,Setor de atividade,LMR?,Quantidade Material LMR
+# 130       - Material, Prz.entrg.prev., 1 LTD,2 LTD,3 LTD,4 LTD,5 LTD,6 LTD,7 LTD,8 LTD,9 LTD,10 LTD,11 LTD,12 LTD,13 LTD,14 LTD,15 LTD,16 LTD,17 LTD,18 LTD,19 LTD,20 LTD,21 LTD,22 LTD,23 LTD,24 LTD,25 LTDutf-8
+# 0053      - Material, Peso bruto, Volume
+
+## Mais de um material por linha (join)
+# OC        - Material, Texto breve, Documento de compras, data do documento,Fornecedor/centro fornecedor
+# 0028      - Material, Tipo de reserva, Centro custo,data base,Nome do usuário,Cód. Localização,Descrição do Equipamento,Material,Texto,Com registro final,Item foi eliminado,Motivo da Reserva
+# textos    - Material, Texto OBS - pt,Texto DB - pt
+
+## Verificar se os arquivos existem
+for file in ['OP.XLSX', 'SAN.XLSX', '130.XLSX', '0053.XLSX', 'OC.XLSX', '0028.XLSX', 'textos.XLSX']:
+    if not os.path.exists(f'{DIR_PATH}{file}'):
+        print(f'Arquivo {file} não encontrado')
+
+## Carregar dados com as colunas selecionadas de arquivos em excel
 @st.cache_data
 def load_data():
-        
-    DIR_PATH = './data/'
-    # op, oc, consumo, req, san, reserva
-    op_df = pd.read_excel(DIR_PATH+'op.XLSX')
-    oc_df = pd.read_excel(DIR_PATH+'oc.XLSX')
-    consumo_df = pd.read_excel(DIR_PATH+'130.XLSX',thousands='.',decimal=',')
-    #req_df = pd.read_excel(DIR_PATH+'req.XLSX')
-    san_df = pd.read_excel(DIR_PATH+'san.XLSX')
-    reserva_df = pd.read_excel(DIR_PATH+'reserva.XLSX')
-    textos_df = pd.read_excel(DIR_PATH+'textos.XLSX')
-    return op_df, consumo_df, san_df, reserva_df,oc_df,textos_df
-op_df, consumo_df, san_df, reserva_df,oc_df, textos_df= load_data()
+    
+    op      = pd.read_excel(f'{DIR_PATH}OP.XLSX',       usecols=['AbertPl','Material','Nº do material','PlMRP','GrpMercads.','GMRP','PEP','Criticidade','TpM','Demanda','Saldo Virtual','Pt.reabast.','Est.máximo','Qtd.ordem','CMM','Estq.segurança','Quantidade Tp 1','Quantidade Tp 3','Quantidade Tp 6','Valor total da Orden Planejada','NºPF'])
+    san     = pd.read_excel(f'{DIR_PATH}SAN.XLSX',      usecols=['Material','Stat.mat.todos cent.','Setor de atividade','LMR?','Quantidade Material LMR'])
+    t0053   = pd.read_excel(f'{DIR_PATH}0053.XLSX',     thousands='.', decimal=',', usecols=['Material','Peso bruto','Volume'])
+    oc      = pd.read_excel(f'{DIR_PATH}OC.XLSX',       usecols=['Material','Texto breve','Documento de compras','Data do documento','Fornecedor/centro fornecedor'])
+    t0028   = pd.read_excel(f'{DIR_PATH}0028.XLSX',     usecols=['Material','Tipo de reserva','Centro custo','Data base','Nome do usuário','Cód. Localização','Descrição do Equipamento','Material','Texto','Com registro final','Item foi eliminado','Motivo da Reserva'])
+    textos  = pd.read_excel(f'{DIR_PATH}textos.XLSX',   usecols=['Material','Texto OBS - pt','Texto DB - pt', 'Texto - pt','Texto REF LMR'])
+    t130    = pd.read_excel(f'{DIR_PATH}130.XLSX',      nrows=10000,   thousands='.', decimal=',', usecols=['Material','Prz.entrg.prev.','1 LTD','2 LTD','3 LTD','4 LTD','5 LTD','6 LTD','7 LTD','8 LTD','9 LTD','10 LTD','11 LTD','12 LTD','13 LTD','14 LTD','15 LTD','16 LTD','17 LTD','18 LTD','19 LTD','20 LTD','21 LTD','22 LTD','23 LTD','24 LTD','25 LTD'])
+    
+    return op, san, t130, t0053, oc, t0028, textos
 
-def clean_op(df):
-    # turn Material into string
+op, san, t130, t0053, oc, t0028, textos = load_data()
+
+### Ajustar e limpar dataframes ###
+
+## Converter Material para string
+for df in [op, san, t130, t0053, oc, t0028, textos]:
     df['Material'] = df['Material'].astype(str)
-    # fill Criticidade with 0
-    df['Criticidade'] = df['Criticidade'].fillna(0)
-    # fill NºPF  with sem referencia   
-    df['NºPF'] = df['NºPF'].fillna('Sem referencia')
 
-    return df
-op_df = clean_op(op_df)
+t0053['Material'] = t0053['Material'].str.replace('.0','')
 
-def nlarge_2(row):
-    # get the second largest value in the row
-    for i in range(len(row)):
-        if row[i] == row.max():
-            row[i] = 0
-    return row.max()
+df = op
+## Juntar dataframes com um material por linha
+df = df.merge(san, on='Material', how='left')
+df = df.merge(t130, on='Material', how='left')
+df = df.merge(t0053, on='Material', how='left')
 
-def clean_130(df):
-    # turn Material into string
-    df['Material'] = df['Material'].astype(str)
-    # clean spaces
-    df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-    # convert into numeric
-    df.iloc[1:, 3:] = df.iloc[1:, 3:].apply(pd.to_numeric, errors='coerce')
+## Converter colunas para numerico
+lts = ['1 LTD','2 LTD', '3 LTD', '4 LTD', '5 LTD', '6 LTD', '7 LTD', '8 LTD', '9 LTD', '10 LTD', '11 LTD', '12 LTD', '13 LTD', '14 LTD', '15 LTD', '16 LTD', '17 LTD', '18 LTD', '19 LTD', '20 LTD', '21 LTD', '22 LTD', '23 LTD', '24 LTD', '25 LTD']
+if set(lts).issubset(df.columns):
+    df[lts] = df[lts].apply(pd.to_numeric, errors='coerce')
 
-    # create a new column with the second highest value in the row first 12 columns
-    df['2nd highest'] = df.iloc[1:, 3:15].apply(lambda x: nlarge_2(x), axis=1)
+outros_num = ['PEP','Criticidade','Saldo Virtual','Pt.reabast.','Est.máximo','Qtd.ordem','CMM','Estq.segurança','Quantidade Tp 1','Quantidade Tp 3','Quantidade Tp 6','Valor total da Orden Planejada','Quantidade Material LMR']
+if set(outros_num).issubset(df.columns):
+    df[outros_num] = df[outros_num].apply(pd.to_numeric, errors='coerce')
 
-    # average the last 3 values in the row
-    df['Average'] = df.iloc[1:, 3:5].mean(axis=1)
+# Converter colunas para datetime
+datas = ['AbertPl','data do documento','Data base']
+if set(datas).issubset(df.columns):
+    df[datas] = df[datas].apply(pd.to_datetime, errors='coerce')
 
-    return df
-consumo_df = clean_130(consumo_df)
+# Volume e peso por OP convertidos para int e fillna(0)
+df['Volume da OP']      = (df['Volume'] * df['Qtd.ordem']).fillna(0).astype(int)
+df['Peso bruto da OP']  = (df['Peso bruto'] * df['Qtd.ordem']).fillna(0).astype(int)
 
-def clean_san(df):
-    san_df = pd.DataFrame()
-    # turn Material into string
-    san_df['Material'] = df['Material'].astype(str)
-    san_df['Qty in LMR'] = df['Quantidade Material LMR']
-    return san_df
-san_df = clean_san(san_df)
+## Dias em op
+df['Dias em OP'] = (dt.datetime.now() - df['AbertPl']).dt.days
 
-def clean_reserva(df):
-    reserva_df = pd.DataFrame()
-    #filter by Com registro final == x
-    df = df[df['Com registro final'] == 'X']
-    # filter Data base,Descrição do Equipamento,Motivo da Reserva
-    df['Material'] = df['Material'].astype(str)
-    # turn data base in datetime format
-    df['Last reserve'] = pd.to_datetime(df['Data base'], format='%d-%m-%Y %H:%M:%S').dt.strftime('%d-%m-%Y')
-    #filter the last reserve for each material
-    df = df.sort_values('Last reserve').drop_duplicates('Material', keep='last')
-    reserva_df = df[['Material','Last reserve','Descrição do Equipamento','Motivo da Reserva']]
+## Ação
+df['ação'] = ''
+# reordenar colunas
+df = df[['Dias em OP', 'Material', 'Nº do material', 'GMRP', 'Criticidade', 'TpM', 'Demanda', 'GrpMercads.', 'Saldo Virtual', 'Pt.reabast.', 'Est.máximo', 'Qtd.ordem', 'NºPF', 'Estq.segurança', 'Quantidade Tp 1', 'Quantidade Tp 3', 'Quantidade Tp 6', 'ação', 'Valor total da Orden Planejada', 'Setor de atividade', 'Quantidade Material LMR', 'Prz.entrg.prev.', '1 LTD', '2 LTD', '3 LTD', '4 LTD', '5 LTD', 'Volume da OP', 'Peso bruto da OP']]
 
-    return reserva_df
-reserva_df = clean_reserva(reserva_df)
+## converter para string
+df['GrpMercads.'] = df['GrpMercads.'].astype(str)
 
-def clean_oc(df):
-    oc_df = pd.DataFrame()
-    # turn Material into string
-    df['Material'] = df['Material'].astype(str)
-    # drop cells with 'cancelado' in the column 'Texto breve'
-    df = df[~df['Texto breve'].str.contains('cancelado', case=False, na=False)]
-    # filter the last purchase order for each material
-    df = df.sort_values('Data do documento').drop_duplicates('Material', keep='last')
-    df['Last OC'] = pd.to_datetime(df['Data do documento'], format='%d-%m-%Y %H:%M:%S').dt.strftime('%d-%m-%Y')
-    oc_df = df[['Material','Last OC']]
+#df.to_excel(f'{DIR_PATH}OP_analisado.xlsx', index=False,freeze_panes=(1,0))
 
-    return oc_df
-oc_df = clean_oc(oc_df)
+setor_atividade = pd.DataFrame([27,28,29,30,31,33], columns=['Setor de atividade'])
+setor_atividade['Setor de atividade'] = setor_atividade['Setor de atividade'].astype(str)
 
-def clean_textos(df):
-    # turn Material into string
-    df['Material'] = df['Material'].astype(str)
-    # drop NaN values from the OBS field
-    df = df.dropna(subset=['Texto OBS - pt'])
-    df['Texto OBS - pt'] = df['Texto OBS - pt'].astype(str)
-    #join all Texto OBS - pt for each material
-    obs_df = df.groupby('Material')['Texto OBS - pt'].apply(lambda x: '\n'.join(x))
+#filrar setor de atividade - 27,28,29,30,31,33
+df = df[df['Setor de atividade'].isin([27,28,29,30,31,33])]
+
+# Streamlit
+
+st.title('Análise de Ordens Planejadas')
+
+st.write('## Dados')
+
+geral_tab, setor_tab, individual_tab = st.tabs(['Geral','por Setor','por Material'])
+
+# Set filters for data
+# Divide by GrpMercads., GMRP, TpM, setor de atividade
+st.sidebar.markdown('## Filtros')
+grp_merc = st.sidebar.multiselect('Selecione os grupos de mercadorias', df['GrpMercads.'].unique())
+gmrp = st.sidebar.multiselect('Selecione os GMRP', df['GMRP'].unique())
+tpm = st.sidebar.multiselect('Selecione a Política', df['TpM'].unique())
+setor = st.sidebar.multiselect('Selecione o setor de atividade', df['Setor de atividade'].unique())
+dias_em_op = st.sidebar.multiselect('Dias em OP < ', [30, 60, 90, 180])
+
+# Treat each filter 
+if len(grp_merc) == 0:
+    grp_merc = df['GrpMercads.'].unique()
+if len(gmrp) == 0:
+    gmrp = df['GMRP'].unique()
+if len(tpm) == 0:
+    tpm = df['TpM'].unique()
+if len(setor) == 0:
+    setor = df['Setor de atividade'].unique()
+if len(dias_em_op) == 0:
+    dias_em_op = [1000]
+
+filtered_df = df[
+    (df['GrpMercads.'].isin(grp_merc)) &
+    (df['GMRP'].isin(gmrp)) &
+    (df['TpM'].isin(tpm)) &
+    (df['Setor de atividade'].isin(setor)) &
+    (df['Dias em OP'] <= dias_em_op[0]) 
+]
+
+with geral_tab:
+
+    # Show resume of filtered data 
+    # Mean of Dias em OP and sum of Valor total da Orden Planejada
+    st.write('#### Resumo dos dados filtrados')
+    st.write(f"Média de dias em OP: {int(filtered_df['Dias em OP'].mean())} dias")
+    st.write(f"Soma do valor em OP: $ {filtered_df['Valor total da Orden Planejada'].sum():,.2f}")
+    st.write(f"Quantidade de itens: {filtered_df.shape[0]}")
+    st.write(f"Quantidade de itens com LMR: {filtered_df[filtered_df['Criticidade'] > 0].shape[0]}")
+
+    # Show data
+    st.write(filtered_df)
+
+with setor_tab:
+
+    dias_filtered = dias_em_op[0]
+    filtered_df = filtered_df.fillna(0)
+    # media de dias em op round to 2 decimal places
+    setor_atividade['Media de dias em OP'] = filtered_df.groupby('Setor de atividade')['Dias em OP'].mean().values.round(0)
+    # plot media
+    fig = px.bar(setor_atividade, x='Setor de atividade', y='Media de dias em OP', title='Media de dias em OP por setor de atividade')
+    st.plotly_chart(fig)
+
+    # qte de itens novos(<30d)
+    setor_atividade['Qte de itens'] = filtered_df[filtered_df['Dias em OP'] < dias_filtered].groupby('Setor de atividade')['Dias em OP'].count().values
+    # plot qte de itens
+    fig = px.bar(setor_atividade, x='Setor de atividade', y='Qte de itens', title='Qte de itens por setor de atividade')
+    st.plotly_chart(fig)
+
+    # qte de itens novos com criticidade > 0
+    setor_atividade['Qte de itens com criticidade > 0'] = filtered_df[(filtered_df['Dias em OP'] < dias_filtered) & (df['Criticidade'] > 0)].groupby('Setor de atividade')['Dias em OP'].count().values
+    # plot
+    fig = px.bar(setor_atividade, x='Setor de atividade', y='Qte de itens com criticidade > 0', title='Qte de itens com LMR por setor de atividade')
+    st.plotly_chart(fig)
+
+    # valor total dos itens novos
+    setor_atividade['Valor total'] = filtered_df[filtered_df['Dias em OP'] < dias_filtered].groupby('Setor de atividade')['Valor total da Orden Planejada'].sum().values.round(0)
+    # plot 
+    fig = px.bar(setor_atividade, x='Setor de atividade', y='Valor total', title='Valor total por setor de atividade')
+    st.plotly_chart(fig)
+
+    # Show data
+    st.write(setor_atividade)
+
+with individual_tab:
+
+    # input a specific material
+    material = st.text_input('Digite o material', '')
+    material_df = df[df['Material'] == material]
+    st.table(material_df.T)
+
+    #print reservas in t0028
+    reservas = t0028[t0028['Material'] == material]
+    st.write('Reservas')
+    st.write(reservas)
+
+    #print oc ordenada por data
+    oc_df = oc[oc['Material'] == material]
+    st.write('Ordens de compra')
+    st.write(oc_df.sort_values('Data do documento', ascending=False))
+
+    # plotar consumo por LTD
+    # convert 0130 to long format
+    t130_long = t130.melt(id_vars='Material', var_name='LTD', value_name='Consumo')
+    t130_long = t130_long[t130_long['Material'] == material]
+    #limit to 12 LTD
+    t130_long = t130_long[t130_long['LTD'].isin([f'{i} LTD' for i in range(1,13)])]
+    #remove previsao de entrega
+    t130_long = t130_long[t130_long['LTD'] != 'Prz.entrg.prev.']
+    fig = px.bar(t130_long, x='LTD', y='Consumo', title=f'Consumo por LTD {df[["Prz.entrg.prev."]].values[0]}')
+    # add a line for ponto de reabastecimento
+    fig.add_hline(y=material_df['Pt.reabast.'].values[0], line_dash='dot', line_color='red', annotation_text='Ponto de reabastecimento')
+    # add a line for estoque maximo
+    fig.add_hline(y=material_df['Est.máximo'].values[0], line_dash='dot', line_color='green', annotation_text='Estoque máximo')
+    st.plotly_chart(fig)
     
-    return obs_df
-textos_df = clean_textos(textos_df)
-
-#######################
-# Functions
-
-def days_to_now(date):
-    # convert value to datetime
-    date = pd.to_datetime(date)
-    # calculate the days
-    date = dt.datetime.now() - date
-    return date.days
     
-def days_in_op(df):
-    # convert AbertPl to datetime
-    df['AbertPl'] = pd.to_datetime(df['AbertPl'])
-    # calculate the days
-    df['AbertPl'] = dt.datetime.now() - df['AbertPl']
-    df['AbertPl'] = df['AbertPl'].dt.days
-    return df['AbertPl']
-
-def summary(op_df, san_df, consumo_df, reserva_df):
-    
-    #OP
-    df = pd.DataFrame()
-    df["Action"] = ''
-    df["Material"] = op_df["Material"]
-    df["Description"] = op_df["Nº do material"]
-    
-    df["Policy"] = op_df['TpM']
-    df['PR'] = op_df['Pt.reabast.'].astype(int)
-    df['Max'] = op_df['Est.máximo'].astype(int)
-    df['LT'] = op_df['PEP'].astype(int)
-    #df["Policy"] = df['TpM'].astype(str) + ' = ' + df['Pt.reabast.'].astype(str) + '/' + df['Est.máximo'].astype(str)
-    df["GM"] = op_df["GrpMercads."]
-    df['Status'] = op_df['GMRP']
-    df['Criticity'] = op_df['Criticidade']
-    df['Reserved'] = op_df['Quantidade Tp 3']
-    df['Order Value'] = op_df['Valor total da Orden Planejada'].round().astype(int)
-    df['Virtual Stock'] = op_df['Saldo Virtual'].astype(float)
-
-    df['Qty OP'] = op_df['Qtd.ordem'].astype(float)
-    df["Days in planned order"] = days_in_op(op_df)
-    df['Reference'] = op_df['NºPF']
-    
-    #OC
-    # merge last purchase order with the df
-    df = df.merge(oc_df, on='Material', how='left')
-    #SAN
-    df = df.merge(san_df, on='Material', how='left')
-    #RESERVA
-    # merge last reserve with the df
-    df = df.merge(reserva_df, on='Material', how='left')
-    #CONSUMO
-    df = df.merge(consumo_df[['Material','2nd highest']], on='Material', how='left')
-    #TEXTOS
-    df = df.merge(textos_df, on='Material', how='left')
-
-    return df
-
-data_df = summary(op_df, san_df, consumo_df,reserva_df)
-
-def define_action(df):
-    df['Action'] = ''
-    if df['LT'] < 30:
-        df['Action'] += "Ajustar LT"
-    if df['Status'] == 'ZSTK':
-        if df['Reference']=='Sem referencia':
-            df['Action'] += (' /Atribuir referencia')
-        try:
-            if days_to_now(int(df['Last OC'])) < 12*30:
-                df['Action'] += ' /Revisar consumo/Aumentar MAX'
-            if days_to_now(int(df['Last OC'])) > 60*30:
-                df['Action'] += ' /Revisar referencia'
-        except:
-            pass
-
-        if df['Policy'] == 'ZM':
-            if df['2nd highest'] < 0.8*df['PR']:
-                df['Action'] += f' /Diminuir PR para {df["2nd highest"]} e ajustar Est. Máximo'
-            elif df['2nd highest'] > df['PR']:
-                df['Action'] += f' /Aumentar PR para {df["2nd highest"]} e ajustar Est. Máximo'
-            try:
-                if df['Texto OBS - pt'].contains('desenho') == True:
-                    df['Action'] += ' \Anexar desenho'
-                elif df['Texto OBS - pt'].contains('sustentabilidade') == True:
-                    df['Action'] += ' \Anexar sustentabilidade'
-            except:
-                pass
-                
-        elif df['Policy'] =='ZE' and df['Order Value'] < ORDER_ZE_TRESHOLD:
-            df['Action'] += ' /ZE com valor baixo'
-            
-    elif df['Status'] == 'SMIT':
-        df['Action'] = 'Cobrar atualização na consulta'
-    elif df['Status'] == 'ANA':
-        if df['Qty in LMR'] > 0:
-            df['Action'] = 'Abrir consulta SMIT'
-    elif df['Status'] == 'FRAC':
-        if df['Qty in LMR'] > 0:
-            df['Action'] = 'Abrir consulta SMIT'
-    elif df['Status'] == 'AD':
-        df['Action'] = 'Solicitar cotação ou verificar se o fornecedor esta cadastrado'
-    elif df['Policy'] == 'ND':
-        df['Action'] = 'Excluir OP, sem política'
-    elif df['Status'] == 'ZDCO':
-        df["Action"] = "Mudar politica para ZD e status para ZSTK"
-    elif df['Status'] == 'DESC':
-        df["Action"] = "Revisar texto/Jira Aberto"
-    else:
-        df['Action'] = 'Revisar Status'
-    
-    return df
-
-data_df = data_df.apply(define_action, axis=1)
-
-# group by first 4 digits in GM 
-def group_gm(df):
-    df['GM'] = df['GM'].astype(str)
-    df['GM_4dig'] = df['GM'].str[:4]
-    # sort by GM_4dig
-    grouped = df.sort_values('GM_4dig')
-    group_gm = grouped.groupby('GM_4dig').agg({'Material':'count','Order Value':'sum'}).sort_values('Order Value', ascending=False)
-    #print groups separately
-    #for group in group_gm.index:
-    #    print(grouped[grouped['GM_4dig'] == group])
-    #return grouped
-group_gm(data_df)
-
-# General info
-# Average AbertPl time
-# make today - AbertPl and calculate the average
-average_op_time = data_df["Days in planned order"].mean()
-
-# Group per GMRP and TpM and count the number of each
-grouped_status = data_df['Status'].value_counts().sort_values(ascending=False)
-grouped_policy = data_df['Policy'].value_counts().sort_values(ascending=False)
-
-# top 10% of the most expensive materials wita a $ in front
-ten_percent = data_df['Order Value'].quantile(0.9)
-most_expensive = data_df[data_df['Order Value'] > ten_percent].sort_values('Order Value', ascending=False)
-most_expensive['Order Value'] = most_expensive['Order Value']
-
-pr_1 = data_df[(data_df['PR'] == 1) & (data_df['Policy'].isin(['ZM', 'ZE']))][['Material','Description', 'Policy','Order Value']]
-
-#######################
-###### Streamlit ######
-
-# Create a Streamlit app
-st.title("OP ANALYSIS - SECTOR 31")
-
-# Display general info
-# insert a container on the left
-
-general_info, specific_info, actions = st.tabs(['GenInfo','SpecInfo','Actions'])
-
-with general_info:
-        
-    st.subheader("General Info")
-
-    st.write(f"* Average time on planned order =  **{int(average_op_time)} days**")
-    st.write("* Top 10% most expensive OP ")
-    st.dataframe(most_expensive[['Material','Description', 'Order Value']],use_container_width=True,hide_index=True)
-    
-    #filter by Pt.reabast. = 1 and TpM ZM, ZE
-    st.write("* ZM/ZE with PR=1")
-    st.dataframe(pr_1,use_container_width=True,hide_index=True)
-
-    c1,c2 = st.columns([1,1])
-    c1.subheader("Materials by GMRP")
-    c1.bar_chart(grouped_status)
-    c2.subheader("Materials by Policy")
-    c2.bar_chart(grouped_policy)
-
-with specific_info:
-    # Add a filter to the DataFrame
-    st.subheader("Filter inventory data")
-
-    selected_material = st.multiselect("Select material:", data_df["Material"].unique())
-    # add a filter GMRP
-    #selected_gmrp = st.multiselect("Select GMRP:", op_df["GMRP"].unique())
-
-    if selected_material:
-        with st.container():
-            filtered_df = data_df[data_df["Material"].isin(selected_material)]
-            # get Nº do material out of the df
-            name = filtered_df['Action'].unique()
-            st.write(f"Ação: **{name[0]}**")
-            specs, graph = st.columns([1, 2])
-            #Drop headers from transposed table
-            # filtered_df = filtered_df.drop(columns=['Material','Description','Policy','GM','Status','Criticidade','Reserved','Order Value','Virtual Stock','Qty OP','Days in planned order','Reference','Last OC','Qty in LMR'])
-            filtered_df['Order Value'] = filtered_df['Order Value'].apply(lambda x: f'$ {x:,.2f}')
-
-            specs.dataframe(filtered_df[['Material','Description','Policy','PR','Max','GM','LT','Status','Criticity','Reserved','Order Value','Virtual Stock','Qty OP','Days in planned order','Reference','Last OC','Qty in LMR']].transpose(),use_container_width=True,height=700)
-
-            # plot consumption data from selected material
-            # each row is a different material and each column is a different consumption value
-            data = consumo_df[consumo_df['Material'].isin(selected_material)].iloc[:, 3:-2].dropna(axis=1)
-            # turn data into vector and reverse
-            data_vector = pd.Series(data.values.flatten()[::-1])
-            # Create a new DataFrame for Plotly
-            df = pd.DataFrame({'Demand': data_vector, 'LT': data_vector.index})
-
-            # Create a line chart with Plotly
-            # Start x on 1 
-            fig = px.bar(df, x='LT', y='Demand', title='Consumption', labels={'LT': 'Lead Time(Forward)', 'Demand': 'Demand'}, range_x=[1, len(data_vector)])
-            
-            # Display the Plotly chart in Streamlit
-            graph.plotly_chart(fig)
-
-            #upload a photo
-            graph.image('./data/fotos/teste.JPG',use_column_width=True,caption='teste',output_format='auto')
-            graph.write('OBS:')
-            graph.write(filtered_df['Texto OBS - pt'].values[0])
-            # plot the last reserve: Last reserve, Descrição do Equipamento, Motivo da Reserva
-            st.write("Ultima reserva")
-            st.dataframe(filtered_df[['Last reserve', 'Descrição do Equipamento', 'Motivo da Reserva']],use_container_width=True,hide_index=True)
-
-with actions:
-    st.subheader("Actions")
-    st.write("Here you can take actions on the inventory data")
-    
-
-    policy_tab, status_tab, gm_tab = st.columns([1,1,1])
-    policy = policy_tab.multiselect("Select Policy:", data_df["Policy"].unique())
-    if not policy:
-        policy = data_df["Policy"].unique()
-
-    status = status_tab.multiselect("Select Status:", data_df["Status"].unique())
-    if not status:
-        status = data_df["Status"].unique()
-        
-    # filter by the 4 first digits of GM
-    # Convert 'GM' column to string
-    data_df['GM'] = data_df['GM'].astype(str)
-    
-    # Now you can slice the first 4 characters
-    gm = gm_tab.multiselect("Select GM:", data_df["GM"].str[:4].unique())
-    if not gm:
-        gm = data_df["GM"].str[:4].unique()
-
-    # Filter the DataFrame
-    data_filtered_df = data_df[(data_df['Policy'].isin(policy)) & (data_df['Status'].isin(status)) & (data_df['GM'].str[:4].isin(gm))]
-    
-
-
-    st.dataframe(data_filtered_df)
-
-
-# Clean table
-def clean_table(df):
-    # Clean empty spaces
-    df = consumo_df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-    # Remove dots 
-    df = df.apply(lambda x: x.str.replace('.', '') if x.dtype == "object" else x)
-    # Replace commas with dots
-    df = df.apply(lambda x: x.str.replace(',', '.') if x.dtype == "object" else x)
-    # Convert to numeric
-    df = df.apply(pd.to_numeric, errors='ignore') 
-    return df
-
-#onsumo_df = clean_table(consumo_df)
-
-# Calculate the CV² for non-zero values each row, do not consider empty values
-#consumo_df['CV²'] = (consumo_df[consumo_df!=0].iloc[:, 3:].std(axis=1) / consumo_df[consumo_df!=0].iloc[:, 3:].mean(axis=1)) ** 2
-# Fill the empty values with 0 
-# se há apenas 1 valor não nulo, o CV² é 0
-#consumo_df['CV²'] = consumo_df['CV²'].fillna(0)
-
-# Calculate the average time between non-zero values for each row
-def avg_zero_seq(row):
-    zero_lengths = []
-    count = 0
-    for i in range(len(row)):
-        if row[i] == 0:
-            count += 1
-        else:
-            if i > 0 and row[i-1] != 0:
-                zero_lengths.append(0)
-            if count > 0:
-                zero_lengths.append(count)
-                count = 0
-    if count > 0:
-        zero_lengths.append(count)
-    return np.mean(zero_lengths) if zero_lengths else np.nan
-
-# Calculate the average length of repeating zeros between non-zero values for each row
-#consumo_df['Avg_Time_Between_Demands'] = consumo_df.iloc[:, 3:].apply(avg_zero_seq, axis=1)
-
-# Classification with these parameters:
-# CV² consumption > 0.49 and Average time between consumption > 1,32 = Esporádico
-# CV² consumption > 0.49 and Average time between consumption < 1,32 = Intermitente
-# CV² consumption < 0.49 and Average time between consumption > 1,32 = Erratico
-# CV² consumption < 0.49 and Average time between consumption < 1,32 = Suave
-
-# Classify each row
-def classify(row):
-    #if row length < 3 then it is not possible to classify
-    if len(row.dropna())-5 < 3:
-        return 'Menos de 3 LTs'
-    elif row['CV²'] > 0.49 and row['Avg_Time_Between_Demands'] > 1.32:
-        return 'Esporádico'
-    elif row['CV²'] > 0.49 and row['Avg_Time_Between_Demands'] < 1.32:
-        return 'Intermitente'
-    elif row['CV²'] < 0.49 and row['Avg_Time_Between_Demands'] > 1.32:
-        return 'Errático'
-    else:
-        return 'Suave'
-#consumo_df['Classification'] = consumo_df.apply(classify, axis=1)
-
+print('Fim do script')
